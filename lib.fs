@@ -39,16 +39,16 @@ type ModelAndUpdater<'state, 'msg, 'event when 'event : equality and 'state: equ
 
     let stateFSM = Mailbox.Start(stateProc)
     member __.Dispatch m = stateFSM.Post(m)
-    member __.Connect(e1, e2, f, condition) =
-        match tree.TryFind e1 with 
-        | None -> tree.Add(e1, (HashSet [ e2, f, condition ]))
-        | Some branches -> branches.Add(e2,f,condition) |> ignore
+    member __.Connect(sourceEvent, triggeredEvent, run, condition) =
+        match tree.TryFind sourceEvent with 
+        | None -> tree.Add(sourceEvent, (HashSet [ triggeredEvent, run, condition ]))
+        | Some branches -> branches.Add(triggeredEvent,run,condition) |> ignore
 
-    member m.Connect(e1,f, condition) = m.Connect(e1,nullevent, f, condition)
+    member m.Connect(sourceEvent,run, condition) = m.Connect(sourceEvent,nullevent, run, condition)
 
-    member m.Connect(e1,f) = m.Connect(e1,nullevent, f, fun _ -> true)
+    member m.Connect(sourceEvent,run) = m.Connect(sourceEvent,nullevent, run, fun _ -> true)
 
-    member m.Connect(e1,e2, f) = m.Connect(e1,e2, f, fun _ -> true)
+    member m.Connect(sourceEvent,triggeredEvent, run) = m.Connect(sourceEvent,triggeredEvent, run, fun _ -> true)
      
 type MaybeBuilder() =
     member __.Bind(x, f) =
@@ -58,5 +58,6 @@ type MaybeBuilder() =
     member __.Delay(f) = f()
     member __.Return(x) = Some x
     member __.ReturnFrom(x) = x
+    member __.Zero() = None
 
 let maybe = MaybeBuilder()
