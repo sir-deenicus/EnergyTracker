@@ -54,7 +54,7 @@ type MainActivity() =
         let space = new View(this)
         space.SetBackgroundColor(Android.Graphics.Color.Gray)
         space.LayoutParameters <- new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MatchParent,
-                                                                height = 5, BottomMargin = 15,
+                                                                height = 2, BottomMargin = 15,
                                                                 TopMargin = 15)
 
         solarTab.LayoutParameters <- new ViewGroup.LayoutParams(LinearLayout.LayoutParams.MatchParent,
@@ -69,13 +69,18 @@ type MainActivity() =
         addLabelEditPair (SolarTextChanged, BATTERYVOLTS, "Battery Volts", solarTab)
         addLabelEditPair (SolarTextChanged, BATTERYWATTS, "Battery Watts", solarTab)
 
-        let checkbox = new CheckBox(this, Text = "Battery full or stabilizing")
-        checkbox.CheckedChange.Add (fun e -> model.Dispatch (CheckChanged e.IsChecked)) 
-        solarTab.AddView checkbox 
+        let buildCheckBox (txt,ischecked, f, parent:LinearLayout) =
+            let checkbox = new CheckBox(this, Text = txt, Checked = ischecked)
+            checkbox.CheckedChange.Add (fun e -> model.Dispatch (f e.IsChecked)) 
+            parent.AddView checkbox
+
+        buildCheckBox("Battery full or stabilizing", false, CheckChanged, solarTab)
+        buildCheckBox("Allow updating of Solar Volts text", false, CheckSVChanged, solarTab)
         
-        let checkboxLoad = new CheckBox(this, Text = "Has Load", Checked = true)
-        checkboxLoad.CheckedChange.Add (fun e -> model.Dispatch (CheckLoadChanged e.IsChecked)) 
-        solarTab.AddView checkboxLoad 
+        let smsg = new TextView(this)         
+        solarTab.AddView smsg
+
+        //---
 
         let electricityTab = new LinearLayout(this, Orientation = Orientation.Vertical)
         electricityTab.LayoutParameters <- solarTab.LayoutParameters
@@ -84,40 +89,88 @@ type MainActivity() =
         button2.Click.Add(fun _ -> model.Dispatch ElectricitySave)
         electricityTab.AddView button2 
 
-        addLabelEditPair (ElectricityChanged, 4, "kWh Left: ", electricityTab)
-        addLabelEditPair (ElectricityChanged, 5, "Power use: ", electricityTab)
+        addLabelEditPair (ElectricityChanged, ELECTRICITYLEFT, "kWh Left: ", electricityTab)
+        addLabelEditPair (ElectricityChanged, WATTSUSE, "Power use: ", electricityTab)
 
-        let emsg = new TextView(this)
-
-        let checkboxRenewing = new CheckBox(this, Text = "Renewing")
-        checkboxRenewing.CheckedChange.Add (fun e -> model.Dispatch (ElectricityRenewalChecked e.IsChecked)) 
-        electricityTab.AddView checkboxRenewing 
+        let emsg = new TextView(this)         
         electricityTab.AddView emsg
+
+        buildCheckBox
+            ("Renewing", false, ElectricityRenewalChecked, electricityTab)
                 
         createTab ((fun _ -> model.Dispatch (TabChanged 0)), "Solar")
         createTab ((fun _ -> model.Dispatch (TabChanged 1)), "Grid")
-         
-        let updateE (s:State) =
-            match s.ElectricitykWhLeft, s.ElectricityWatts with  
-            | Some kwh, Some w -> 
-                 emsg.Text <- String.Format("Previously at {2}: Energy Left: {0} kWh, Power: {1} kW", kwh, w, (fst s.EnergyHistory).DateTime)
-            | _ -> ()
         
-        let changeTab (st : State) =
-            match st.CurrentTab with 
-            | 0 ->  parent.RemoveView(electricityTab); parent.AddView(solarTab)
-            | 1 -> parent.RemoveView(solarTab); parent.AddView(electricityTab)  
+        //----
+        
+        let updateSolarMsg (s : State) =
+            let prev, h = s.SolarHistory
+
+            let lookup hr =
+                match h.TryFind hr with
+                | None -> ""
+                | Some vs ->
+                    [| for v in vs do
+                           if v.DateTime.Date >= DateTime.Now.Date.AddDays(-1.) 
+                              && (DateTime.Now - v.DateTime).TotalHours <= 4. then
+                               yield v.DateTime,
+                                     string v.DateTime + " | "
+                                     + fstring v.BatteryVolts + "V | "
+                                     + fstring v.SolarAmps + "A" + " | "
+                                     + fstring v.BatteryWatts + "W" |]
+                    |> Array.sortByDescending fst
+                    |> Array.map snd
+                    |> String.concat "\n"
+            if prev.SolarAmps <> -1. then
+                let recentVolts =
+                    [ for h in 0.0..4.0 ->
+                          lookup (DateTime.Now.AddHours(-h).Hour) ]
+                    |> String.concat "\n"
+                smsg.Text <- String.Format
+                                 ("Previously at {0}: Battery: {1} V, Solar Amps: {2} A\n\nRecently:\n{3}",
+                                  prev.DateTime, prev.BatteryVolts,
+                                  prev.SolarAmps, recentVolts)
+
+        let updateElectricityMsg (s : State) =
+            let table() =
+                match recent 20 s with
+                | Some es ->
+                    let str =
+                        es.[max 0 (es.Length - 10)..]
+                        |> Array.map
+                               (fun e ->
+                               String.Format
+                                   ("{0} | {1} | {2}", string e.DateTime, fstring e.EnergyLeft,
+                                    fstring e.PowerInUse))
+                        |> Array.rev
+                        |> String.concat "\n"
+                    let day1, slope, zeroLoc = getZero es
+                    String.Format("{0}\n\nSlope: {3} kWh/day, 5 kWh in ~{1} days, {2}",str, fstring zeroLoc,day1.AddDays zeroLoc, fstring slope)
+                | None -> ""
+            match s.ElectricitykWhLeft, s.ElectricityWatts with
+            | Some kwh, Some w ->
+                emsg.Text <- String.Format
+                                ("Previously at {2}: Energy Left: {0} kWh, Power: {1} kW\n\nRecent:\n{3}",
+                                kwh, w, (fst s.EnergyHistory).DateTime, table())
             | _ -> ()
 
-        let tryChangeBatteryVolts (s:State) =
-            match s.SolarVolts with 
-            | None -> 
+        let changeTab (st : State) =
+            match st.CurrentTab with
+            | 0 ->
+                parent.RemoveView(electricityTab)
+                parent.AddView(solarTab)
+            | 1 ->
+                parent.RemoveView(solarTab)
+                parent.AddView(electricityTab)
+            | _ -> ()
+
+        let tryChangeSolarVolts (s:State) =
+            if s.AllowSVChange then 
                 maybe { 
                     let! sa = s.SolarAmps
                     let! bw = s.BatteryWatts 
-                    do editTexts.[SOLARVOLTS].Text <- string (bw / sa) }   
-                |> ignore
-            | _ -> ()
+                    do editTexts.[SOLARVOLTS].Text <- fstring (bw / sa) }   
+                |> ignore 
 
         let saveToast (s:State) =  
             if s.LastSaveSuccessful then
@@ -125,30 +178,32 @@ type MainActivity() =
 
         model.Connect("TabChanged", changeTab) 
         model.Connect ("SolarSave", saveToast)
+        model.Connect ("SolarSave", updateSolarMsg)
         model.Connect ("ElectricitySave", saveToast)
-        model.Connect ("ElectricitySave", updateE)
+        model.Connect ("ElectricitySave", updateElectricityMsg)
         
         model.Connect("SolarTextChanged",
             (fun s -> 
                 maybe { let! sv = s.SolarVolts
                         let! sa = s.SolarAmps 
-                        let updatetxt =  "Solar Watts: " + string (sa * sv)
+                        let updatetxt =  "Solar Watts: " + fstring (sa * sv)
                         if solarLabel.Text <> updatetxt then solarLabel.Text <- updatetxt} 
                 |> ignore 
                 maybe { let! bv = s.BatteryVolts
                         let! bw = s.BatteryWatts
                         let solartxt = match s.SolarAmps with 
                                         | None -> ""
-                                        | Some sa -> " (Solar Watts: " + string(bv * sa) + ")"
-                        let utxt = "Battery Amps: " + string (bw / bv) + solartxt
+                                        | Some sa -> " (Solar Watts: " + fstring(bv * sa) + ")"
+                        let utxt = "Battery Amps: " + fstring (bw / bv) + solartxt
                         if utxt <> batteryLabel.Text then batteryLabel.Text <- utxt } 
                 |> ignore
                 
-                tryChangeBatteryVolts s))
+                tryChangeSolarVolts s))
 
         parent.AddView solarTab
 
         this.SetContentView(parent)
-        model.Connect ("Init", "ShowPrev", ignore)
-        model.Connect ("ShowPrev", updateE)
+        model.Connect ("Init", "ShowPrevious", ignore)
+        model.Connect ("ShowPrevious", updateElectricityMsg)
+        model.Connect ("ShowPrevious", updateSolarMsg)
         model.Dispatch (Init this)

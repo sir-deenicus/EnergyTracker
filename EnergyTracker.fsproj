@@ -79,8 +79,8 @@
     <Compile Include="model.fs" />
     <Compile Include="MainActivity.fs" />
     <AndroidAsset Include="Assets\AboutAssets.txt" />
-    <None Include="GettingStarted.Xamarin" />
     <Content Include="packages.config" />
+    <None Include="workshop.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FSharp.Core">

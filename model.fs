@@ -19,10 +19,16 @@ let BATTERYVOLTS = 2
 [<Literal>] 
 let BATTERYWATTS = 3
 
+[<Literal>] 
+let ELECTRICITYLEFT = 4
+
+[<Literal>] 
+let WATTSUSE = 5
+
 type Msg = 
     | SolarTextChanged of int * string   
-    | CheckChanged of bool
-    | CheckLoadChanged of bool
+    | CheckChanged of bool 
+    | CheckSVChanged of bool
     | ElectricityRenewalChecked of bool
     | TabChanged of int
     | ElectricityChanged of int * string 
@@ -33,9 +39,9 @@ type Msg =
 let msgToName = function
     | SolarTextChanged _ -> "SolarTextChanged"  
     | CheckChanged _ -> "CheckChanged"
+    | CheckSVChanged _ -> "CheckSVChanged"
     | TabChanged _ -> "TabChanged" 
-    | ElectricityChanged _ -> "GridChanged"
-    | CheckLoadChanged _ -> "CheckLoadChanged"
+    | ElectricityChanged _ -> "GridChanged" 
     | ElectricityRenewalChecked _ -> "ElectricityRenewalChecked"
     | Init _ -> "Init"
     | m -> string m
@@ -55,15 +61,13 @@ type SolarState =
       SolarAmps : float
       BatteryVolts : float
       BatteryWatts : float
-      HasLoad : bool
       BatteryFull : bool }
     static member New() =
-        { DateTime = DateTime.Now
-          SolarVolts = 0.
-          SolarAmps = 0.
-          BatteryVolts = 0.
-          BatteryWatts = 0.
-          HasLoad = false
+        { DateTime = DateTime.MinValue
+          SolarVolts = -1.
+          SolarAmps = -1.
+          BatteryVolts = -1.
+          BatteryWatts = -1.
           BatteryFull = false }
 
 type State =
@@ -75,7 +79,7 @@ type State =
       BatteryVolts : float option
       BatteryWatts : float option
       BatteryFull : bool
-      HasLoad : bool
+      AllowSVChange: bool
       CurrentTab : int
       IsElectricityRenewal : bool
       LastSaveSuccessful : bool
@@ -93,7 +97,6 @@ type State =
                      SolarAmps = sa
                      BatteryVolts = bv
                      BatteryWatts = bw
-                     HasLoad = s.HasLoad
                      BatteryFull = s.BatteryFull }
         }
 
@@ -104,9 +107,9 @@ type State =
           SolarAmps = None
           BatteryVolts = None
           BatteryWatts = None
-          HasLoad = true
           BatteryFull = false
           SavePath = ""
+          AllowSVChange = false
           CurrentTab = 0
           LastSaveSuccessful = false
           IsElectricityRenewal = false
@@ -118,6 +121,41 @@ let docdir (context : Context) =
 
 let solardat dir = IO.Path.Combine(dir, "solar.txt")
 let energydat dir = IO.Path.Combine(dir, "energyuse.txt")
+
+let fstring (x:float) = string (Math.Round(x, 2)) 
+
+let recent take (s:State) =
+    let _, h = s.EnergyHistory
+    if h.Count > 0 then
+        let last = h.[h.Count - 1]
+        let len = last.Count
+        Some(last.ToArray().[max 0 (len - take)..])
+    else None
+
+let simpleStats (vec : float []) (vec2 : float []) = 
+    let xm, ym = vec |> Array.average, vec2 |> Array.average
+    let cov_, varx_ =
+        (vec, vec2) 
+        ||> Array.fold2 
+                (fun (cov, varx) x y -> 
+                cov + (x - xm) * (y - ym), varx + ((x - xm)**2.)) 
+                (0., 0.)
+    let len = float vec.Length
+    let cov, varx = cov_ / len, varx_ / len
+    let beta = cov / varx
+    {|Slope = beta; Intercept = ym - beta * xm; Covariance = cov; VarianceX = varx|}
+
+let getZero(es : EnergyState []) = 
+    let points =
+        es
+        |> Array.map (fun e -> e.DateTime, e.EnergyLeft)
+        |> Array.sortBy fst
+    let d1,_ = points.[0]
+    let stats =
+        points |> Array.map (fun (d,x) -> (d - d1).TotalDays, x) 
+        |> Array.unzip
+        ||> simpleStats
+    d1, stats.Slope, (5. - stats.Intercept) / stats.Slope
 
 let getElectricityData dir =
     let file = energydat dir
@@ -146,14 +184,14 @@ let update (st : State) (m : Msg) =
         | BATTERYVOLTS -> { st with BatteryVolts = tryFloat s }
         | BATTERYWATTS -> { st with BatteryWatts = tryFloat s }
         | _ -> st
-    | CheckChanged b -> { st with BatteryFull = b }
-    | CheckLoadChanged b -> { st with HasLoad = b }
+    | CheckChanged b -> { st with BatteryFull = b } 
+    | CheckSVChanged b -> {st with AllowSVChange = b}
     | ElectricityRenewalChecked b -> { st with IsElectricityRenewal = b }
     | TabChanged i -> { st with CurrentTab = i }
     | ElectricityChanged(i, s) ->
         match i with
-        | 4 -> { st with ElectricitykWhLeft = tryFloat s }
-        | 5 -> { st with ElectricityWatts = tryFloat s }
+        | ELECTRICITYLEFT -> { st with ElectricitykWhLeft = tryFloat s }
+        | WATTSUSE -> { st with ElectricityWatts = tryFloat s }
         | _ -> st
     | ElectricitySave ->
         match (st.ElectricityWatts, st.ElectricitykWhLeft) with
@@ -162,6 +200,7 @@ let update (st : State) (m : Msg) =
             | prev, h when (prev.PowerInUse, prev.EnergyLeft) <> (w, kwh) ->
                 if st.IsElectricityRenewal || h.Count = 0 then
                     h.Add(ResizeArray())
+
                 let currentindex = h.Count - 1
 
                 let newpoint =
